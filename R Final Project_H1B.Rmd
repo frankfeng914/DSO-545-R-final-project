@@ -1,0 +1,698 @@
+---
+title: "R Final Project_H1B"
+output: word_document
+---
+Loading Packages & Datasets
+```{r}
+library(stringr)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(rvest)
+library(ggmap)
+library(tidyr)
+library(tm)
+library(wordcloud)
+library(gridExtra)
+library(twitteR)
+
+masterdata = read.csv("h1b_kaggle.csv")
+year2017 = read.csv("H-1B_FY2017.csv")
+year2018= read.csv("H-1B_FY2018.csv")
+```
+
+Data Consolidation - merge data from year 2011 to 2018
+```{r}
+year2017 = year2017[,2:53]
+
+colnames(year2017) == colnames(year2018)
+colnames(year2018)[1] = "CASE_NUMBER"
+colnames(year2018)[43] = "H1B_DEPENDENT"
+
+year2017$YEAR = 2017
+year2018$YEAR = 2018
+
+year2018$PREVAILING_WAGE = str_replace_all(year2018$PREVAILING_WAGE,",","")
+
+twoyears = rbind(year2017,year2018)
+
+twoyears = select(twoyears, "CASE_NUMBER", "CASE_STATUS", "EMPLOYER_NAME", "JOB_TITLE", "SOC_NAME",
+                  "FULL_TIME_POSITION", "PREVAILING_WAGE", "PW_UNIT_OF_PAY", "WORKSITE_CITY", "WORKSITE_STATE","YEAR")
+
+levels(twoyears$PW_UNIT_OF_PAY)
+
+twoyears$PREVAILING_WAGE = as.numeric(as.character(twoyears$PREVAILING_WAGE))
+
+twoyears$PREVAILING_WAGE = ifelse(twoyears$PW_UNIT_OF_PAY == "Bi-Weekly",
+                                  twoyears$PREVAILING_WAGE * 26,
+                                  ifelse(twoyears$PW_UNIT_OF_PAY == "Hour",
+                                          twoyears$PREVAILING_WAGE *2080,
+                                          ifelse(twoyears$PW_UNIT_OF_PAY == "Month",
+                                                 twoyears$PREVAILING_WAGE * 12,
+                                                 ifelse(twoyears$PW_UNIT_OF_PAY == "Week",
+                                                        twoyears$PREVAILING_WAGE * 52,
+                                                        twoyears$PREVAILING_WAGE))))
+
+
+stateslink = "https://www.50states.com/abbreviations.htm"
+statestable = stateslink %>%
+  read_html() %>%
+  html_nodes(xpath = '//*[@id="content"]/div[1]/table') %>%
+  html_table()
+
+statestable = statestable[[1]]
+statestable = statestable[c(1:50,52:60),]
+colnames(statestable) = c("full_name","Abbreviation")
+
+twoyears_states = full_join(twoyears,statestable, by = c("WORKSITE_STATE" = "Abbreviation"))
+
+masterdata = masterdata %>%
+  separate(col = WORKSITE, into = c("WORKSITE_CITY", "WORKSITE_STATE"), sep = ", ")
+
+masterdata = masterdata[,c(1:8,10)]
+twoyears_states = twoyears_states[,c(1:3,5,4,6:7,11:12)]
+
+colnames(masterdata) = c("CASE_NUMBER", "CASE_STATUS", "EMPLOYER_NAME", "SOC_NAME","JOB_TITLE",
+                         "FULL_TIME_POSITION", "PREVAILING_WAGE", "YEAR", "WORKSITE_STATE")
+
+colnames(twoyears_states) = c("CASE_NUMBER", "CASE_STATUS", "EMPLOYER_NAME", "SOC_NAME","JOB_TITLE",
+                         "FULL_TIME_POSITION", "PREVAILING_WAGE", "YEAR", "WORKSITE_STATE")
+
+colnames(masterdata)==colnames(twoyears_states)
+
+final = rbind(masterdata,twoyears_states)
+```
+
+
+Data Cleansing,Standardize Data Format, And Output Master Dataset
+```{r}
+final = final %>%
+  filter(CASE_STATUS != "NA",
+         FULL_TIME_POSITION != "",
+         PREVAILING_WAGE != "NA",
+         WORKSITE_STATE != "NA",
+         SOC_NAME != "NA")
+
+final$CASE_NUMBER = seq.int(nrow(final))
+
+final$CASE_STATUS = as.factor(tolower(final$CASE_STATUS))
+final$EMPLOYER_NAME = as.factor(tolower(final$EMPLOYER_NAME))
+final$SOC_NAME = as.factor(tolower(final$SOC_NAME))
+final$JOB_TITLE = as.factor(tolower(final$JOB_TITLE))
+final$FULL_TIME_POSITION = as.factor(tolower(final$FULL_TIME_POSITION))
+final$WORKSITE_STATE = as.factor(tolower(final$WORKSITE_STATE))
+final$YEAR = as.integer(final$YEAR)
+
+write.csv(final,"master.csv")
+```
+
+Overall Situation of H1B Application From 2011 to 2018
+```{r}
+Total_Applicant = final %>%
+  group_by(YEAR,CASE_STATUS) %>%
+  summarize(count = n()) %>%
+  filter(YEAR != "NA") %>%
+  spread(key = CASE_STATUS,value = count)
+
+Total_Applicant = Total_Applicant[,-c(5,6,7)]
+
+Total_Applicant = Total_Applicant %>%
+  mutate(TTL = sum(certified+`certified-withdrawn`+denied+withdrawn))
+
+Total_Applicant$Applicant = ifelse(Total_Applicant$TTL>600000,"High","Low")
+
+ggplot(Total_Applicant,aes(x = YEAR, y = TTL,fill = Applicant))+
+  geom_col()+
+  coord_flip()+
+  ggtitle("The Total Application Received By LCA From 2011 To 2018") +
+  ylab("") +
+  xlab("")+
+  scale_x_continuous(breaks = seq(2011,2018,1),labels = seq(2011,2018,1))+
+  scale_y_continuous(breaks = seq(0,600000,200000),labels = c("0","200,000","400,000","600,000"))+
+  scale_fill_manual(values = c("darkred","lightblue"))
+```
+```{r}
+Percent_Certified = Total_Applicant %>%
+  summarize(Percent = certified/TTL*100)
+
+ggplot(Percent_Certified,aes(x= YEAR, y = Percent))+
+  geom_line()+
+  geom_point(aes(x = YEAR, y = Percent),color ="red")+
+  ylab("")+
+  xlab("")+
+  ggtitle("The Pecentage of CERTIFIED From 2011 To 2018")+
+  scale_y_continuous(breaks = seq(84,90,1),labels = c("84%","85%","86%","87%","88%","89%","90%"))+
+  scale_x_continuous(breaks = seq(2011,2018,1),labels =seq(2011,2018,1))
+```
+```{r}
+final$Certified = ifelse(final$CASE_STATUS == "certified","Certified","Non-certified")
+
+K = final %>%
+  group_by(YEAR,Certified) %>%
+  summarize(count =n())
+
+ggplot(K,aes(x = YEAR, y= count,fill = Certified)) +
+  geom_col()+
+  ggtitle("The Percantage of CERTIFIED From 2011 To 2018")+
+  xlab("")+
+  ylab("")+
+  scale_x_continuous(breaks = seq(2011,2018,1),labels = seq(2011,2018,1))+
+  scale_y_continuous(breaks = seq(0,600000,200000),labels = c("0","200,000","400,000","600,000"))
+
+```
+
+
+```{r}
+top10job=final%>%
+  group_by(JOB_TITLE)%>%
+  mutate(Count=n())%>%
+  arrange(desc(Count))%>%
+  distinct(JOB_TITLE,.keep_all = TRUE)
+
+top10job=top10job[1:10,]
+top10job$JOB_TITLE=as.factor(top10job$JOB_TITLE)
+
+ggplot(top10job,aes(reorder(JOB_TITLE,Count),
+                    y=Count,
+                    fill=Count))+
+  geom_col()+
+  coord_flip()+
+  scale_y_continuous(breaks=seq(0,400000,50000))+
+  xlab("Job Title")+
+  ylab(NULL)+
+  scale_fill_gradient(low="orange",
+                      high="dark red",
+                      guide=FALSE)+
+  ggtitle("Top 10 Jobs for H1B")+
+  theme(plot.title = element_text(hjust  =0.5))+
+  xlab("")
+```
+
+
+```{r}
+top10company=final%>%
+  group_by(EMPLOYER_NAME)%>%
+  mutate(Count=n())%>%
+  arrange(desc(Count))%>%
+  distinct(EMPLOYER_NAME,.keep_all = TRUE)
+top10company$EMPLOYER_NAME=toupper(top10company$EMPLOYER_NAME)
+  
+
+top10company=top10company[1:10,]
+
+ggplot(top10company,aes(reorder(EMPLOYER_NAME,Count),
+                        y=Count,
+                        fill=Count))+
+  geom_col()+
+  coord_flip()+
+  scale_y_continuous(breaks=seq(0,400000,50000))+
+  xlab("Company Name")+
+  ylab(NULL)+
+  scale_fill_gradient(low="light blue",
+                      high="dark blue",
+                      guide=FALSE)+
+  ggtitle("Top 10 Companies for H1B")+
+  xlab("")+
+  theme(plot.title = element_text(hjust  =0.5))
+```
+
+Distribution of Different Statuses Across US
+```{r}
+M = final %>%
+  select(CASE_STATUS,WORKSITE_STATE)%>%
+  group_by(CASE_STATUS,WORKSITE_STATE) %>%
+  summarize(count =n())%>%
+  spread(key = CASE_STATUS,value  =count)
+
+M = M[,-c(5,6,7)]
+M = M[-c(9,28,41),]
+
+state_map = map_data("state")
+state_map = state_map[,-6]
+
+N  = full_join(state_map,M,by = c("region"="WORKSITE_STATE"))
+
+p1 = ggplot(N, aes(x =long, 
+                   y= lat,
+                   group = group,       
+                   fill= certified))+
+  geom_polygon( color = "black")+
+  theme_void()+
+  scale_fill_gradient(low = "white",high = "darkred") +
+  coord_map("polyconic")+
+  ggtitle("CERTIFIED")+
+  theme(legend.title = element_blank())
+
+p2 = ggplot(N, aes(x =long, 
+                   y= lat,
+                   group = group,       
+                   fill= certified-withdrawn))+
+  geom_polygon( color = "black")+
+  theme_void()+
+  scale_fill_gradient(low = "white",high = "darkred") +
+  coord_map("polyconic")+
+  ggtitle("CERTIFIED-WITHDRAWN")+
+  theme(legend.title = element_blank())
+
+p3  = ggplot(N, aes(x =long, 
+                    y= lat,
+                    group = group,       
+                    fill= denied))+
+  geom_polygon( color = "black")+
+  theme_void()+
+  scale_fill_gradient(low = "white",high = "darkred") +
+  coord_map("polyconic")+
+  ggtitle("DENIED")+
+  theme(legend.title = element_blank())
+
+p4 = ggplot(N, aes(x =long, 
+                   y= lat,
+                   group = group,       
+                   fill= withdrawn))+
+  geom_polygon( color = "black")+
+  theme_void()+
+  scale_fill_gradient(low = "white",high = "darkred") +
+  coord_map("polyconic")+
+  ggtitle("WITHDRAWN")+
+  theme(legend.title = element_blank())
+
+
+grid.arrange(p1,p2,p3,p4,nrow=2,ncol=2)
+```
+
+Living Cost Index And Salary Index
+```{r}
+page = "https://www.missourieconomy.org/indicators/cost_of_living/"
+
+Index = page %>%
+  read_html() %>%
+  html_nodes(xpath = '/html/body/div[5]/div/table') %>%   
+  html_table()
+Index = Index[[1]]
+Index = Index[-1,]
+colnames(Index) = c("State","Rank","Index","Grocery","Housing","Utlities","Transportation","Health","Misc.")
+Index = Index[-1,]
+
+Index$Index = as.numeric(Index$Index)
+
+Top10_livingcost_index = Index %>%
+  arrange(-Index) %>%
+  slice(1:10)
+
+ggplot(Top10_livingcost_index,aes(x = reorder(State,Index),
+                                  y = Index,
+                                  fill = State,
+                                  color = State,
+                                  label = Index))+
+  coord_flip()+
+  geom_col()+
+  geom_text(nudge_y = 5)+
+  ggtitle("Top10 States of Living Cost Index")+
+  xlab("")+
+  ylab("")+
+  theme(legend.position="none")+
+  theme(plot.title = element_text(hjust  =0.5))
+```
+```{r}
+salary = final %>%
+  select(PREVAILING_WAGE,WORKSITE_STATE)
+
+avg_state = salary %>%
+  filter(! is.na(PREVAILING_WAGE)) %>%
+  group_by(WORKSITE_STATE) %>%
+  summarize(avg_state = mean(PREVAILING_WAGE))
+
+avg_overall = salary %>%
+  filter(! is.na(PREVAILING_WAGE)) %>%
+  summarize(avg = mean(PREVAILING_WAGE))
+
+avg_state$avg_overall = c(rep(146998.4,57))
+avg_state$salary_index = avg_state$avg_state/avg_state$avg_overall*100
+avg_state$salary_index = round(avg_state$salary_index,1)
+
+top10_salaery_index = avg_state%>%
+  arrange(-salary_index) %>%
+  slice(1:10)
+
+ggplot(top10_salaery_index,aes( x = reorder(WORKSITE_STATE,salary_index),
+                                y = salary_index,
+                                fill = WORKSITE_STATE,
+                                color = WORKSITE_STATE,
+                                label = salary_index))+
+  geom_col()+
+  coord_flip()+
+  geom_text(nudge_y = 5)+
+  xlab("") +
+  ylab("") +
+  ggtitle("Top10 States of Salary Index")+
+  theme(legend.position = "none ") +
+  theme(plot.title = element_text(hjust  =0.5))
+```
+
+Distributions of Two Indexes Across U.S.
+```{r}
+Index$State = tolower(Index$State)
+Index = Index[,-2]
+Index = Index[,-c(3:8)]
+
+LC_map = full_join(Index,state_map, by= c("State" = "region"))
+
+str(LC_map)
+LC_map$Index = as.numeric(LC_map$Index)
+
+LCindex = ggplot(LC_map, aes(x =long, 
+                             y= lat,
+                             group = group,       
+                             fill= Index))+
+  geom_polygon(color = "black")+
+  theme_void()+
+  scale_fill_gradient(low = "white",high = "darkred") +
+  coord_map("polyconic")+
+  theme(legend.title = element_blank())+
+  ggtitle("Living Cost by States")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+S_map = full_join(Index,state_map, by = c("State" = "region"))
+
+str(S_map)
+S_map$Index = as.numeric(S_map$Index)
+
+sindex = ggplot(S_map, aes(x =long, 
+                           y= lat,
+                           group = group,       
+                           fill= Index))+
+  geom_polygon(color = "black")+
+  theme_void()+
+  scale_fill_gradient(low = "white",high = "darkred") +
+  coord_map("polyconic")+
+  theme(legend.title = element_blank())+
+  ggtitle("Salary Index by States")+
+  theme(plot.title = element_text(hjust = 0.5))
+
+grid.arrange(LCindex,sindex,nrow=1,ncol=2)
+```
+
+
+```{r}
+avg_state$WORKSITE_STATE = as.character(avg_state$WORKSITE_STATE)
+
+
+combine_two_index = full_join(avg_state,Index, by = c("WORKSITE_STATE" = "State"))
+
+combine_two_index = combine_two_index %>%
+  filter(!is.na(Index) & !is.na(salary_index)) %>%
+  arrange(Index)
+
+combine_two_index$Index = as.numeric(combine_two_index$Index)
+combine_two_index$salary_index = as.numeric(combine_two_index$salary_index)
+combine_two_index$diff = ifelse(combine_two_index$salary_index>combine_two_index$Index,"Good","Bad" )
+
+ggplot(combine_two_index,aes(x = salary_index,
+                             y = Index,
+                             color = diff))+
+  geom_point()+
+  geom_text(aes(label = WORKSITE_STATE),hjust = 1.2,vjust = 0.8)+
+  geom_abline(slope = 1)+
+  xlab("Salary Index")+
+  ylab("Living Cost Index")+
+  scale_x_continuous(breaks = seq(40,200,20))+
+  scale_y_continuous(breaks = seq(80,180,20))+
+  ggtitle("More Desireable Place For A Job")+
+  theme(plot.title = element_text(hjust  =0.5))
+```
+
+
+Salary Trend From 2011 to 2018
+```{r}
+ final %>%
+  filter(YEAR,PREVAILING_WAGE) %>%
+  group_by(YEAR) %>%
+  summarize(avg = mean(PREVAILING_WAGE,rm.na  =T)) %>%
+   ggplot(aes(x = YEAR,
+              y = avg))+
+   geom_line()+
+   geom_point(size =3, color = "red")+
+   scale_x_continuous(breaks = seq(2011,2018,1))+
+   ggtitle("Average Salary Trend From 2011 To 2018")+
+   theme(plot.title = element_text(hjust  =0.5))+
+   scale_y_continuous(breaks = seq(90000,180000,30000),labels = c("90,000","120,000","150,000","180,000"))+
+   ylab("")+
+   xlab("")
+```
+
+Distrubition of Salary From 2011 to 2018
+```{r}
+Density2018 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2018")
+Density2018$YEAR = as.factor(Density2018$YEAR)
+
+Density2017 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2017")
+Density2017$YEAR = as.factor(Density2017$YEAR)
+
+Density2016 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2016")
+Density2016$YEAR = as.factor(Density2016$YEAR)
+
+Density2015 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2015")
+Density2015$YEAR = as.factor(Density2015$YEAR)
+
+Density2014 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2014")
+Density2014$YEAR = as.factor(Density2014$YEAR)
+
+Density2013 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2013")
+Density2013$YEAR = as.factor(Density2013$YEAR)
+
+Density2012 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2012")
+Density2012$YEAR = as.factor(Density2012$YEAR)
+
+Density2011 = final %>%
+  filter(CASE_STATUS == "certified" & YEAR == "2011")
+Density2011$YEAR = as.factor(Density2011$YEAR)
+
+
+ggplot(Density2018, aes(x = PREVAILING_WAGE,fill = YEAR)) + 
+  geom_density(alpha = 0.9, position = "identity")+
+  geom_density(data = Density2017,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.7,color = NA,position = "identity")+
+  geom_density(data = Density2016,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.6,color = NA,position = "identity")+
+  geom_density(data = Density2015,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.1,color = NA,position = "identity")+
+  geom_density(data = Density2014,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.1,color = NA,position = "identity")+
+  geom_density(data = Density2013,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.1,color = NA,position = "identity")+
+  geom_density(data = Density2012,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.1,color = NA,position = "identity")+
+  geom_density(data = Density2011,
+               aes(x = PREVAILING_WAGE,fill = YEAR),
+               alpha = 0.1,color = NA,position = "identity")+
+  theme(legend.title = element_blank())+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ggtitle("Salary Distribution From 2011 to 2018")+
+  xlab("Salary Level")+
+  xlim(8000,150000)
+```
+
+
+```{r}
+tech = final %>%
+  filter(EMPLOYER_NAME !="NA")
+
+tech$SOC_NAME = as.character(tech$SOC_NAME)
+testtech = ifelse(str_detect(tech$SOC_NAME,c("computer","software"))==TRUE,print(tech$CASE_NUMBER),"")
+com = tech %>%
+  filter(CASE_NUMBER == testtech)
+unique(com$SOC_NAME)
+
+
+testtech1 = ifelse(str_detect(tech$SOC_NAME,"engineer")==TRUE,print(tech$CASE_NUMBER),"")
+eng = tech %>%
+      filter(CASE_NUMBER == testtech1)
+
+testtech2 = ifelse(str_detect(tech$SOC_NAME,"science")==TRUE,print(tech$CASE_NUMBER),"")
+sci = tech %>%
+  filter(CASE_NUMBER == testtech2)
+
+testtech3 = ifelse(str_detect(tech$SOC_NAME,"math")==TRUE,print(tech$CASE_NUMBER),"")
+math = tech %>%
+  filter(CASE_NUMBER == testtech3)
+
+Tec =rbind(com,eng,sci,math)
+
+Tec = Tec %>%
+  group_by(CASE_NUMBER)
+Tec=Tec[!duplicated(Tec$CASE_NUMBER),]
+
+Tec$Tech = "YES"
+Tec$Tech =as.factor(Tec$Tech)
+
+
+ggplot(Tec,aes(x = PREVAILING_WAGE,fill = Tech))+
+  geom_density(alpha = 0.5,color =NA, position = "identity")+
+  xlim(10000,400000)
+
+techcase = Tec$CASE_NUMBER
+
+Nontech=final%>%
+  filter(!CASE_NUMBER %in% techcase)
+Nontech$tech="NO"
+Nontech$tech=as.factor(Nontech$tech)
+
+
+ggplot(Tec,aes(x = PREVAILING_WAGE,fill = Tech))+
+  geom_density(alpha = 0.5,color =NA, position = "identity")+
+  geom_density(data = Nontech,aes(x = PREVAILING_WAGE, fill = tech),
+               alpha = 0.5,color =NA, position = "identity")+
+  xlim(10000,200000)+
+  ggtitle("The Salary Distribution of Tech and Non-Tech")
+
+
+Teccr= filter(Tec,CASE_STATUS =="certified")
+tecrate = round(nrow(Teccr)/(nrow(Tec))*100,2)
+
+
+Nontechcr = filter(Nontech,CASE_STATUS == "certified")
+Nontechrate= round(nrow(Nontechcr)/(nrow(Nontech))*100,2)
+```
+
+
+The Salary Distribution of Education Industry 
+```{r}
+edu = final %>%
+  filter(CASE_STATUS == "certified") %>%
+  filter(EMPLOYER_NAME !="NA")
+
+## Find University
+edu$EMPLOYER_NAME = as.character(edu$EMPLOYER_NAME)
+
+test = ifelse(str_detect(edu$EMPLOYER_NAME,"univeristy")==TRUE,print(edu$CASE_NUMBER),"")
+unique(test)
+Uni = edu %>%
+  filter(CASE_NUMBER == test)
+
+
+test1 = ifelse(str_detect(edu$EMPLOYER_NAME,"school")==TRUE,print(edu$CASE_NUMBER),"")
+unique(test1)
+Sch = edu %>%
+  filter(CASE_NUMBER == test1)
+
+
+test2 = ifelse(str_detect(edu$EMPLOYER_NAME,"college")==TRUE,print(edu$CASE_NUMBER),"")
+unique(test2)
+Col = edu %>%
+  filter(CASE_NUMBER == test2)
+
+
+Edu =rbind(Uni,Sch,Col)
+EDU = Edu %>%
+  group_by(CASE_NUMBER)
+EDU$Education = rep("Education",40748)
+EDU$Education =as.factor(EDU$Education)
+
+
+ggplot(EDU,aes(x = PREVAILING_WAGE,fill = Education))+
+  geom_density(alpha = 0.5,color =NA, position = "identity")+
+  xlim(10000,400000)+
+  theme(plot.title = element_text(hjust  =0.5))+
+  xlab("")+
+  ylab("")+
+  ggtitle(" Salary Distribution of Education")
+```
+
+Compare The Salary Distribution of Education With Non-Education
+```{r}
+
+test4 = ifelse(str_detect(final$EMPLOYER_NAME,c("college","university","school")) == FALSE,print(edu$CASE_NUMBER),"")
+
+unique(test4)
+
+cdata = final %>%
+  filter(CASE_STATUS == "certified")
+
+Non_EDU = cdata %>%
+  filter(CASE_NUMBER %in% test4)
+
+Non_EDU$Education = rep("Non_Education",3447722)
+  
+
+ggplot(EDU,aes(x = PREVAILING_WAGE,fill = Education))+
+  geom_density(alpha = 0.5,color =NA, position = "identity")+
+  geom_density(data = Non_EDU,aes(x = PREVAILING_WAGE, fill = Education),
+               alpha = 0.5,color =NA, position = "identity")+
+  xlim(10000,200000)+
+  ggtitle("The Salary Distribution of Education and Non-Education")+
+  xlab("")+
+  ylab("")+
+  theme(plot.title = element_text(hjust  =0.5))
+```
+
+The Certified Rate of Education & Non-education
+```{r}
+educr = final %>%
+  filter(EMPLOYER_NAME !="NA")
+
+
+educr$EMPLOYER_NAME = as.character(educr$EMPLOYER_NAME)
+
+test = ifelse(str_detect(educr$EMPLOYER_NAME,"univeristy")==TRUE,print(educr$CASE_NUMBER),"")
+Uni = educr %>%
+  filter(CASE_NUMBER == test)
+
+
+test1 = ifelse(str_detect(educr$EMPLOYER_NAME,"school")==TRUE,print(educr$CASE_NUMBER),"")
+Sch = educr %>%
+  filter(CASE_NUMBER == test1)
+
+
+test2 = ifelse(str_detect(educr$EMPLOYER_NAME,"college")==TRUE,print(educr$CASE_NUMBER),"")
+Col = educr %>%
+  filter(CASE_NUMBER == test2)
+
+Educr =rbind(Uni,Sch,Col)
+
+Edu_CR =round(nrow(EDU)/nrow(Educr)*100,2)
+
+Non_Edu_CR = round(nrow(Non_EDU)/(nrow(final)-nrow(Educr))*100,2)
+```
+
+Twitter & Word Cloud
+```{r}
+api_key = "ygI5ryuik1SQu0dLISlfmYsiF"
+api_secret = "kIQH3FhtLi5fQy6jrFS7XISWQjVWRw9WG78tflZoLqWhRarleP"
+access_token = "980611835387772928-ituutfwksxFdet6KagqJebehcABIWAu"
+access_token_secret = "RKkkqFs9hpfLoP4iP6pSWhdBpPSz6ju3wsDqpiHHgX71q"
+
+setup_twitter_oauth(api_key, api_secret, access_token, access_token_secret)
+
+
+TweetsH1B = searchTwitter(searchString = "H1B",n = 200)
+H1BDF = twListToDF(TweetsH1B)
+
+nohandles = str_replace_all(H1BDF$text,
+                            pattern = "@\\w+",
+                            replacement = "")
+
+wordCorpus = Corpus(VectorSource(nohandles)) %>%
+  tm_map(removePunctuation) %>%
+  tm_map(content_transformer(tolower)) %>%
+  tm_map(removeWords, stopwords("english")) %>%
+  tm_map(stripWhitespace)
+
+wordcloud(words = wordCorpus,
+          random.order = FALSE,
+          col = "red")
+```
+
+
